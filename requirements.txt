@@ -1,0 +1,56 @@
+# Core ML / HF stack
+torch>=2.3.0
+transformers>=4.46.0
+datasets>=2.20.0
+accelerate>=0.33.0
+peft>=0.12.0
+trl>=0.16.0
+huggingface-hub>=0.24.0
+safetensors>=0.4.0
+sentencepiece>=0.2.0
+protobuf>=4.25.0
+
+# General utils
+numpy>=1.24.0
+tqdm>=4.66.0
+multiprocess>=0.70.16
+scipy>=1.11.0
+scikit-learn>=1.4.0
+
+# NLP
+spacy>=3.7.0
+nltk>=3.9.0
+sentence-splitter>=1.4
+sacrebleu>=2.4.0
+termcolor>=2.4.0
+
+# Evaluation / QE
+unbabel-comet>=2.2.0
+
+# Retrieval
+bm25s>=0.2.0
+rank-bm25>=0.2.2
+PyStemmer>=2.2.0
+GraKeL>=0.1.10
+
+# APIs used by sampler/evaluation
+openai>=1.40.0
+anthropic>=0.34.0
+cohere>=5.8.0
+
+# Logging
+wandb>=0.17.0
+
+# FastText language id
+fasttext>=0.9.3; platform_system != "Windows"
+fasttext-wheel>=0.9.2; platform_system == "Windows"
+
+# Optional heavy deps (Linux/WSL recommended)
+vllm>=0.6.0; platform_system != "Windows"
+deepspeed>=0.15.0; platform_system != "Windows"
+# flash-attn>=2.6.0; platform_system != "Windows"
+bitsandbytes>=0.45.0; platform_system != "Windows"
+
+# SONAR / BLASER ecosystem (used in some reward/retrieval paths)
+sonar-space>=0.3.0; platform_system != "Windows"
+fairseq2>=0.3.0; platform_system != "Windows"

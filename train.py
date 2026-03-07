@@ -805,7 +805,7 @@ def run_training(args, train_data, val_data):
         print(f"We use PEFT!")
         model = AutoModelForCausalLM.from_pretrained(
             args.model_name_or_path,
-            use_auth_token=True,
+            token=True,
             # use_cache=not args.gradient_checkpointing,
             torch_dtype=torch.bfloat16,
             device_map=(
@@ -816,7 +816,6 @@ def run_training(args, train_data, val_data):
             # device_map="auto",
             # device_map="cuda",
             trust_remote_code=True,
-            use_flash_attention_2=args.use_flash_attn,
             # use_flash_attn=args.use_flash_attn,
             load_in_8bit=args.load_in_8bit and not args.load_in_4bit,
             load_in_4bit=args.load_in_4bit,
@@ -845,13 +844,12 @@ def run_training(args, train_data, val_data):
     else:
         model = AutoModelForCausalLM.from_pretrained(
             args.model_name_or_path,
-            use_auth_token=True,
+            token=True,
             # use_cache=not args.gradient_checkpointing,
             torch_dtype=torch.bfloat16,
             # device_map={"": Accelerator().process_index},
             # device_map="auto",
             trust_remote_code=True,
-            use_flash_attention_2=args.use_flash_attn,
             # use_flash_attn=args.use_flash_attn,
             load_in_8bit=args.load_in_8bit and not args.load_in_4bit,
             load_in_4bit=args.load_in_4bit,
@@ -901,7 +899,7 @@ def main(args):
         else args.model_name_or_path
     )
     tokenizer = AutoTokenizer.from_pretrained(
-        tokenizer_name_or_path, use_auth_token=True, trust_remote_code=True
+        tokenizer_name_or_path, token=True, trust_remote_code=True
     )
     print(f"Model: {args.model_name_or_path}")
     print(f"eos_token: {tokenizer.eos_token}, pad_token: {tokenizer.pad_token}")
@@ -931,7 +929,7 @@ def grpo(args):
 
     tokenizer = AutoTokenizer.from_pretrained(
         tokenizer_name_or_path,
-        use_auth_token=True,
+        token=True,
         trust_remote_code=True,
         padding_side="left",
     )
@@ -1050,7 +1048,7 @@ def grpo(args):
 
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name_or_path,
-        use_auth_token=True,
+        token=True,
         # use_cache=not args.gradient_checkpointing,
         torch_dtype=torch.bfloat16,
         device_map=(
@@ -1061,7 +1059,6 @@ def grpo(args):
         # device_map="auto",
         # device_map="cuda",
         trust_remote_code=True,
-        use_flash_attention_2=args.use_flash_attn,
         # use_flash_attn=args.use_flash_attn,
         load_in_8bit=args.load_in_8bit and not args.load_in_4bit,
         load_in_4bit=args.load_in_4bit,
@@ -1421,7 +1418,7 @@ def seq_to_seq(args):
 
     tokenizer = AutoTokenizer.from_pretrained(
         tokenizer_name_or_path,
-        use_auth_token=True,
+        token=True,
         trust_remote_code=True,
         padding_side="left",
     )
