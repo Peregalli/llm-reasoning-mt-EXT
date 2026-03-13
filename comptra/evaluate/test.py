@@ -4,17 +4,55 @@ import numpy as np
 import itertools
 import json
 import os
+import sys
+from pathlib import Path
 from comptra.data.dataset import get_datasets
-from metricx23.models import MT5ForRegression
 import torch
 import transformers
 from datasets import Dataset
 import time
 
-from comet import load_from_checkpoint, download_model
+try:
+    from comet import load_from_checkpoint, download_model
+except (ModuleNotFoundError, ImportError):
+    load_from_checkpoint = None
+    download_model = None
 from sacrebleu.metrics import BLEU, CHRF
 from scipy import stats
 import argparse
+
+
+def _ensure_metricx23_importable() -> None:
+    try:
+        import metricx23  # noqa: F401
+        return
+    except ModuleNotFoundError:
+        pass
+
+    repo_root = Path(__file__).resolve().parents[2]
+    candidate_paths = [
+        repo_root / "metricx",
+        repo_root / "third_party" / "metricx",
+    ]
+
+    for candidate in candidate_paths:
+        if (candidate / "metricx23").is_dir():
+            sys.path.insert(0, str(candidate))
+            try:
+                import metricx23  # noqa: F401
+                return
+            except ModuleNotFoundError:
+                continue
+
+    raise ModuleNotFoundError(
+        "No module named 'metricx23'. Clone MetricX to "
+        f"{repo_root / 'metricx'} or {repo_root / 'third_party' / 'metricx'}, "
+        "or set PYTHONPATH to the MetricX repository root."
+    )
+
+
+_ensure_metricx23_importable()
+from metricx23.models import MT5ForRegression
 
 bleu = BLEU(tokenize="flores200")
 chrf = CHRF(word_order=2)
@@ -75,12 +113,12 @@ STOP_WORDS = [
     ".....",
     "\n\n\n:",
     ">>\n>",
-    "```\>",
+    "```\\>",
     "````",
     '="true">',
     "....]",
     "\n>>\n",
-    "=\>=",
+    "=\\>=",
     "\n```\n",
     "\n\n\n,",
     "\n\n\n`",
@@ -91,7 +129,7 @@ STOP_WORDS = [
     '="text"',
     "<h3>",
     "<h1>",
-    "\*\*u  ",
+    "\\*\\*u  ",
     "*\n*u\n*u",
     "।\n।\n।",
     "a,\n\n,",
@@ -309,19 +347,37 @@ def parse_args():
 
 from comptra.utils import is_lang
 from comptra.languages import MAPPING_LANG_TO_KEY
-from sonar.models.blaser.loader import load_blaser_model
-from sonar.inference_pipelines.text import TextToEmbeddingModelPipeline
+try:
+    from sonar.models.blaser.loader import load_blaser_model
+    from sonar.inference_pipelines.text import TextToEmbeddingModelPipeline
+except ModuleNotFoundError:
+    load_blaser_model = None
+    TextToEmbeddingModelPipeline = None
+
 import torch
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
-#blaser_qe = load_blaser_model("blaser_2_0_qe", device=device).eval()
-blaser_qe = load_blaser_model("blaser_2_0_qe").eval()
-text_embedder = TextToEmbeddingModelPipeline(
-    encoder="text_sonar_basic_encoder", tokenizer="text_sonar_basic_encoder",
-    #device=device
-)
+blaser_qe = None
+text_embedder = None
+
+
+def _ensure_blaser_models_loaded() -> None:
+    global blaser_qe, text_embedder
+    if blaser_qe is not None and text_embedder is not None:
+        return
+
+    if load_blaser_model is None or TextToEmbeddingModelPipeline is None:
+        raise ModuleNotFoundError(
+            "BLASER dependencies are not installed. Install `sonar-space` and `fairseq2`, "
+            "or run with a metric that does not require BLASER."
+        )
+
+    blaser_qe = load_blaser_model("blaser_2_0_qe").eval()
+    text_embedder = TextToEmbeddingModelPipeline(
+        encoder="text_sonar_basic_encoder", tokenizer="text_sonar_basic_encoder"
+    )
 
 def get_blaser_score(x, y, src, tgt):
+    _ensure_blaser_models_loaded()
     src_embs = text_embedder.predict([x], source_lang=MAPPING_LANG_TO_KEY[src])
     ref_embs = text_embedder.predict([y], source_lang=MAPPING_LANG_TO_KEY[tgt])
     blaser_score = blaser_qe(src=src_embs, mt=ref_embs).item()
@@ -367,6 +423,11 @@ def main(args):
         per_device_batch_size = args.batch_size
 
     if args.metric == "comet":
+        if load_from_checkpoint is None or download_model is None:
+            raise ModuleNotFoundError(
+                "COMET is not installed. Install with `pip install unbabel-comet` "
+                "or run with `--metric metricx`/`--metric chrf`."
+            )
         model_path = download_model(args.model_name_or_path)
         print(f"COMET: {args.model_name_or_path, model_path}")
         model = load_from_checkpoint(model_path, local_files_only=True)
@@ -389,7 +450,17 @@ def main(args):
             dataloader_pin_memory=False,
             report_to="none"
         )
-        trainer = transformers.Trainer(model=model, args=training_args,)
+        # Add data collator for proper padding
+        data_collator = transformers.DataCollatorWithPadding(
+            tokenizer=tokenizer,
+            padding=True,
+            max_length=args.max_input_length,
+        )
+        trainer = transformers.Trainer(
+            model=model,
+            args=training_args,
+            data_collator=data_collator,
+        )
 
         # Datasets utilities
         def _make_input(example):

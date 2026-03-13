@@ -175,6 +175,13 @@ def parse_args():
         action="store_true",
         help="Whether the model_name_or_path is a LoRA fine-tuning. In this case you have to specify --base_model_name_or_path.",
     )
+    parser.add_argument(
+        "--dtype",
+        type=str,
+        default=None,
+        choices=["auto", "half", "float16", "bfloat16", "float", "float32"],
+        help="Data type for model weights. If omitted, original model defaults are used and adjusted only when the GPU does not support them.",
+    )
     return parser.parse_args()
 
 
@@ -244,6 +251,7 @@ def main(args):
         "method_translate": args.method_translate,
         "nllb_name_or_path": args.nllb_name_or_path,
         "method_divide": args.mode_divide if args.mode_divide else args.src,
+        "dtype": args.dtype,
     }
 
     generation_kwargs = {
@@ -462,7 +470,7 @@ def main(args):
                     dico = json.loads(line)
                     break
             # Number of keys in dico indicates the number of sentences that have already been divided
-            print(dico)
+            # print(dico)
             start = 1 + max([v for _, v in dico.items()]) if len(dico) != 0 else 0
             print(f"Resuming from index {start}.")
         else:
