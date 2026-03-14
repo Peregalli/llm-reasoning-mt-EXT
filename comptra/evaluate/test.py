@@ -417,10 +417,10 @@ def main(args):
 
     if torch.cuda.is_available():
         device = torch.device("cuda")
-        per_device_batch_size = args.batch_size // torch.cuda.device_count()
+        per_device_batch_size = max(1, args.batch_size // torch.cuda.device_count())
     else:
         device = torch.device("cpu")
-        per_device_batch_size = args.batch_size
+        per_device_batch_size = max(1, args.batch_size)
 
     if args.metric == "comet":
         if load_from_checkpoint is None or download_model is None:
@@ -435,9 +435,16 @@ def main(args):
     elif args.metric == "metricx":
         tokenizer = transformers.AutoTokenizer.from_pretrained("google/mt5-xl")
         print(f"MetricX23: {args.model_name_or_path}")
-        model = MT5ForRegression.from_pretrained(
-            args.model_name_or_path, torch_dtype=torch.bfloat16
-        )
+        try:
+            model = MT5ForRegression.from_pretrained(
+                args.model_name_or_path, dtype=torch.bfloat16
+            )
+        except TypeError:
+            model = MT5ForRegression.from_pretrained(
+                args.model_name_or_path, torch_dtype=torch.bfloat16
+            )
+        # Avoid decoder cache-path quirks with newer transformers during pure forward eval.
+        model.config.use_cache = False
         model.to(device)
         model.eval()
 
@@ -450,11 +457,10 @@ def main(args):
             dataloader_pin_memory=False,
             report_to="none"
         )
-        # Add data collator for proper padding
+        # Add data collator for proper dynamic padding.
         data_collator = transformers.DataCollatorWithPadding(
             tokenizer=tokenizer,
-            padding=True,
-            max_length=args.max_input_length,
+            padding="longest",
         )
         trainer = transformers.Trainer(
             model=model,
@@ -480,18 +486,36 @@ def main(args):
                 )
             return example
 
-        def _tokenize(example):
-            return tokenizer(
+        def _tokenize_metricx(example):
+            tokenized = tokenizer(
                 example["input"],
                 max_length=args.max_input_length,
                 truncation=True,
                 padding=False,
             )
+            input_ids = tokenized["input_ids"]
+            attention_mask = tokenized.get("attention_mask", [1] * len(input_ids))
 
-        def _remove_eos(example):
-            example["input_ids"] = example["input_ids"][:-1]
-            example["attention_mask"] = example["attention_mask"][:-1]
-            return example
+            # MetricX convention: drop trailing EOS when present.
+            if len(input_ids) > 1 and input_ids[-1] == tokenizer.eos_token_id:
+                input_ids = input_ids[:-1]
+
+            # Keep masks strictly aligned with token IDs.
+            seq_len = min(len(input_ids), len(attention_mask))
+            input_ids = input_ids[:seq_len]
+            attention_mask = attention_mask[:seq_len]
+
+            # Avoid zero-length encoder sequences.
+            if seq_len == 0:
+                pad_token_id = tokenizer.pad_token_id
+                if pad_token_id is None:
+                    pad_token_id = tokenizer.eos_token_id
+                input_ids = [pad_token_id]
+                attention_mask = [0]
+
+            tokenized["input_ids"] = input_ids
+            tokenized["attention_mask"] = attention_mask
+            return tokenized
 
     # Statistical significance parameters
     rng = np.random.default_rng(122)
@@ -600,7 +624,7 @@ def main(args):
                     pass
                 else:
                     store[target][strategy_key] = {}
-                k = int(features[3])
+                k = int(features[3]) if features[3] != 'None' else 0
                 if k in store[target][strategy_key]:
                     pass
                 else:
@@ -621,14 +645,14 @@ def main(args):
                                 "reference": targets,
                             }
                         )
-                    ds = ds.map(_make_input)
-                    ds = ds.map(_tokenize)
-                    ds = ds.map(_remove_eos)
-                    ds.set_format(
-                        type="torch",
-                        columns=["input_ids", "attention_mask"],
-                        device=device,
-                        output_all_columns=True,
+                    ds = ds.map(_make_input, load_from_cache_file=False)
+                    ds = ds.map(_tokenize_metricx, load_from_cache_file=False)
+                    ds = ds.remove_columns(
+                        [
+                            column
+                            for column in ds.column_names
+                            if column not in ["input_ids", "attention_mask"]
+                        ]
                     )
                     score_predictions, _, _ = trainer.predict(test_dataset=ds)
                     store[target][strategy_key][k]["scores"] = score_predictions
