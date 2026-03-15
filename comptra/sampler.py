@@ -1738,14 +1738,18 @@ class AnthropicSampler(Sampler):
 
 
 # """
-# T4 Gemma-3 fp32 workaround: Set FLEX_ATTENTION backend BEFORE vLLM imports
+# T4 Gemma-3 fp32 workaround: Force vLLM V0 engine BEFORE vLLM imports.
+# vLLM 0.17 V1 engine uses TRITON_ATTN which requires 81920 bytes shared memory,
+# but T4 (cc 7.5) is capped at 65536 bytes -> OutOfResources -> EngineDeadError.
+# VLLM_ATTENTION_BACKEND is NOT recognized by vLLM 0.17 (logged as "Unknown env var").
+# VLLM_USE_V1=0 switches to V0 engine (paged-attention CUDA kernels, no Triton).
 import torch
 if torch.cuda.is_available():
     try:
         cc = torch.cuda.get_device_capability(0)
         if cc[0] < 8:  # T4 or older GPU
-            os.environ["VLLM_ATTENTION_BACKEND"] = "FLEX_ATTENTION"
-            print("[PRE-INIT] Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION for T4 GPU")
+            os.environ["VLLM_USE_V1"] = "0"
+            print("[PRE-INIT] Set VLLM_USE_V1=0 for T4 GPU (forces V0 engine, avoids Triton shared-memory overflow)")
     except:
         pass
 
@@ -2057,6 +2061,7 @@ class vLLMSampler(Sampler):
                     )
                 )
             
+            self._llm_model_path = llm_model_path
             self.llm = LLM(
                 model=llm_model_path,
                 tokenizer=self.tokenizer_name_or_path,
@@ -2065,6 +2070,7 @@ class vLLMSampler(Sampler):
                 enforce_eager=True,
                 trust_remote_code=True,
                 swap_space=8,
+                disable_log_stats=True,
                 enable_lora=llm_enable_lora,
                 max_lora_rank=max_lora_rank,
                 tensor_parallel_size=torch.cuda.device_count(),
@@ -2151,6 +2157,78 @@ class vLLMSampler(Sampler):
 
         return merged_model_path
 
+    def _hf_generate_fallback(
+        self,
+        prompts: List[str],
+        max_new_tokens: int,
+        temperature: float,
+        top_p: float,
+        repetition_penalty: float,
+        num_return_sequences: int,
+        verbose: bool,
+    ) -> List[List[str]]:
+        """HuggingFace fallback used when vLLM crashes (e.g. Triton shared-memory OOM on T4)."""
+        import gc
+        from transformers import AutoTokenizer, AutoModelForCausalLM
+
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        model_path = getattr(self, "_llm_model_path", self.model_name_or_path)
+        tok_path = self.tokenizer_name_or_path or model_path
+
+        print(f"HF fallback: loading model from {model_path} ...")
+        hf_tokenizer = AutoTokenizer.from_pretrained(
+            tok_path, trust_remote_code=True, padding_side="left"
+        )
+        if hf_tokenizer.pad_token is None:
+            hf_tokenizer.pad_token = hf_tokenizer.eos_token
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        hf_model = AutoModelForCausalLM.from_pretrained(
+            model_path,
+            torch_dtype=torch.float32,
+            device_map=device,
+            trust_remote_code=True,
+        )
+        hf_model.eval()
+
+        do_sample = temperature > 0.0
+        outputs = []
+        for prompt in prompts:
+            inputs = hf_tokenizer(prompt, return_tensors="pt").to(hf_model.device)
+            prompt_len = inputs["input_ids"].shape[-1]
+            gen_kwargs = dict(
+                max_new_tokens=max_new_tokens,
+                do_sample=do_sample,
+                repetition_penalty=repetition_penalty,
+                num_return_sequences=num_return_sequences,
+            )
+            if do_sample:
+                gen_kwargs["temperature"] = temperature
+                gen_kwargs["top_p"] = top_p
+            with torch.no_grad():
+                gen_ids = hf_model.generate(**inputs, **gen_kwargs)
+            texts = [
+                hf_tokenizer.decode(gen_ids[i, prompt_len:], skip_special_tokens=True)
+                for i in range(num_return_sequences)
+            ]
+            outputs.append(texts)
+
+        del hf_model
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        if verbose:
+            print("===")
+            for i, out in enumerate(outputs):
+                for t in out:
+                    print(f"{i+1} -> {t}")
+            print("===")
+        return outputs
+
     def add_stop_words(self, stop_words: List[str]):
         if not isinstance(stop_words, list):
             stop_words = [stop_words]
@@ -2225,11 +2303,29 @@ class vLLMSampler(Sampler):
                     lora_request=self.LR,
                 )
         else:
-            response = self.llm.generate(
-                prompts,
-                self.sampling_params,
-                lora_request=self.LR,
-            )
+            try:
+                response = self.llm.generate(
+                    prompts,
+                    self.sampling_params,
+                    lora_request=self.LR,
+                )
+            except Exception as _vllm_exc:
+                _exc_str = str(_vllm_exc)
+                _exc_type = type(_vllm_exc).__name__
+                _is_engine_crash = any(
+                    k in _exc_type or k in _exc_str
+                    for k in ["EngineDeadError", "OutOfResources", "shared memory", "EngineCore"]
+                )
+                if _is_engine_crash:
+                    print(
+                        f"vLLM engine crashed ({_exc_type}). "
+                        "Falling back to HuggingFace inference."
+                    )
+                    return self._hf_generate_fallback(
+                        prompts, max_new_tokens, temperature, top_p,
+                        repetition_penalty, num_return_sequences, verbose,
+                    )
+                raise
         if verbose:
             print("===")
             try:
