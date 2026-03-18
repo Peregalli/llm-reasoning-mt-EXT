@@ -269,10 +269,30 @@ def prepare_sample_text(
     example, input_column_name, output_column_name, src="English", tgt="French"
 ):
     """Prepare the text from a sample of the dataset."""
+    def _to_text(value):
+        if isinstance(value, str):
+            return value
+        if isinstance(value, (list, tuple)):
+            chunks = []
+            for i, item in enumerate(value):
+                item_text = _to_text(item).strip()
+                if item_text:
+                    chunks.append(f"{i + 1}. {item_text}")
+            return "\n".join(chunks)
+        if value is None:
+            return ""
+        return str(value)
+
+    input_text = _to_text(example[input_column_name])
     if output_column_name:
-        text = f"Translate this from {src} to {tgt}:\n{src}: {example[input_column_name]}\n{tgt}: {example[output_column_name]}"
+        output_text = _to_text(example[output_column_name])
+        text = (
+            f"Translate this from {src} to {tgt}:\n"
+            f"{src}: {input_text}\n"
+            f"{tgt}: {output_text}"
+        )
     else:
-        text = example[input_column_name]
+        text = input_text
     return text
 
 
@@ -393,6 +413,21 @@ class TLConstantLengthDataset(ConstantLengthDataset):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
+    @staticmethod
+    def _to_text(value):
+        if isinstance(value, str):
+            return value
+        if isinstance(value, (list, tuple)):
+            chunks = []
+            for i, item in enumerate(value):
+                item_text = TLConstantLengthDataset._to_text(item).strip()
+                if item_text:
+                    chunks.append(f"{i + 1}. {item_text}")
+            return "\n".join(chunks)
+        if value is None:
+            return ""
+        return str(value)
+
     def __iter__(self):
         iterator = iter(self.dataset)
         more_examples = True
@@ -403,8 +438,8 @@ class TLConstantLengthDataset(ConstantLengthDataset):
                     break
                 try:
                     example = next(iterator)
-                    q_str = example[self.input_column_name]
-                    a_str = example[self.output_column_name]
+                    q_str = self._to_text(example[self.input_column_name])
+                    a_str = self._to_text(example[self.output_column_name])
                     left = f"Translate this from {example['source_language']} to {example['target_language']}:\n{example['source_language']}: "
                     middle = f"\n{example['target_language']}: "
                     buffer_list.append((left, q_str, middle, a_str))
@@ -1018,8 +1053,8 @@ def grpo(args):
         print(train_dataset[0])
 
     def apply_translation_template(example):
-        q_str = example[args.input_column_name]
-        a_str = example[args.output_column_name]
+        q_str = TLConstantLengthDataset._to_text(example[args.input_column_name])
+        a_str = TLConstantLengthDataset._to_text(example[args.output_column_name])
         left = f"Translate this from {example['source_language']} to {example['target_language']}:\n{example['source_language']}: "
         middle = f"\n{example['target_language']}: "
         return {"prompt": left + q_str + middle.strip(), "solution": a_str}
@@ -1199,7 +1234,18 @@ def grpo(args):
             - lang :
                 A language (e.g. English, French, German etc.)
         """
-        label, p = language_identifier.predict(sentence.strip().split("\n")[0])
+        text = sentence.strip().split("\n")[0]
+        try:
+            label, p = language_identifier.predict(text)
+        except ValueError as e:
+            if "Unable to avoid copy while creating an array as requested" not in str(e):
+                raise
+            _orig_array = np.array
+            np.array = lambda *a, **kw: _orig_array(*a, **{k: v for k, v in kw.items() if k != "copy"})
+            try:
+                label, p = language_identifier.predict(text)
+            finally:
+                np.array = _orig_array
         # print(f"probability: {p[0]}")
         label = label[0]
         return MAPPING_LANG_TO_KEY[lang] in label
@@ -1459,8 +1505,8 @@ def seq_to_seq(args):
     print(train_dataset[0])
 
     def apply_translation_template(example):
-        q_str = example[args.input_column_name]
-        a_str = example[args.output_column_name]
+        q_str = TLConstantLengthDataset._to_text(example[args.input_column_name])
+        a_str = TLConstantLengthDataset._to_text(example[args.output_column_name])
         tokenizer.src_lang = MAPPING_LANG_TO_KEY[example["source_language"]]
         tokenizer.tgt_lang = MAPPING_LANG_TO_KEY[example["target_language"]]
         return tokenizer(

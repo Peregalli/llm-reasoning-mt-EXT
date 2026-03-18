@@ -4,17 +4,55 @@ import numpy as np
 import itertools
 import json
 import os
+import sys
+from pathlib import Path
 from comptra.data.dataset import get_datasets
-from metricx23.models import MT5ForRegression
 import torch
 import transformers
 from datasets import Dataset
 import time
 
-from comet import load_from_checkpoint, download_model
+try:
+    from comet import load_from_checkpoint, download_model
+except (ModuleNotFoundError, ImportError):
+    load_from_checkpoint = None
+    download_model = None
 from sacrebleu.metrics import BLEU, CHRF
 from scipy import stats
 import argparse
+
+
+def _ensure_metricx23_importable() -> None:
+    try:
+        import metricx23  # noqa: F401
+        return
+    except ModuleNotFoundError:
+        pass
+
+    repo_root = Path(__file__).resolve().parents[2]
+    candidate_paths = [
+        repo_root / "metricx",
+        repo_root / "third_party" / "metricx",
+    ]
+
+    for candidate in candidate_paths:
+        if (candidate / "metricx23").is_dir():
+            sys.path.insert(0, str(candidate))
+            try:
+                import metricx23  # noqa: F401
+                return
+            except ModuleNotFoundError:
+                continue
+
+    raise ModuleNotFoundError(
+        "No module named 'metricx23'. Clone MetricX to "
+        f"{repo_root / 'metricx'} or {repo_root / 'third_party' / 'metricx'}, "
+        "or set PYTHONPATH to the MetricX repository root."
+    )
+
+
+_ensure_metricx23_importable()
+from metricx23.models import MT5ForRegression
 
 bleu = BLEU(tokenize="flores200")
 chrf = CHRF(word_order=2)
@@ -75,12 +113,12 @@ STOP_WORDS = [
     ".....",
     "\n\n\n:",
     ">>\n>",
-    "```\>",
+    "```\\>",
     "````",
     '="true">',
     "....]",
     "\n>>\n",
-    "=\>=",
+    "=\\>=",
     "\n```\n",
     "\n\n\n,",
     "\n\n\n`",
@@ -91,7 +129,7 @@ STOP_WORDS = [
     '="text"',
     "<h3>",
     "<h1>",
-    "\*\*u  ",
+    "\\*\\*u  ",
     "*\n*u\n*u",
     "।\n।\n।",
     "a,\n\n,",
@@ -309,19 +347,37 @@ def parse_args():
 
 from comptra.utils import is_lang
 from comptra.languages import MAPPING_LANG_TO_KEY
-from sonar.models.blaser.loader import load_blaser_model
-from sonar.inference_pipelines.text import TextToEmbeddingModelPipeline
+try:
+    from sonar.models.blaser.loader import load_blaser_model
+    from sonar.inference_pipelines.text import TextToEmbeddingModelPipeline
+except ModuleNotFoundError:
+    load_blaser_model = None
+    TextToEmbeddingModelPipeline = None
+
 import torch
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
-#blaser_qe = load_blaser_model("blaser_2_0_qe", device=device).eval()
-blaser_qe = load_blaser_model("blaser_2_0_qe").eval()
-text_embedder = TextToEmbeddingModelPipeline(
-    encoder="text_sonar_basic_encoder", tokenizer="text_sonar_basic_encoder",
-    #device=device
-)
+blaser_qe = None
+text_embedder = None
+
+
+def _ensure_blaser_models_loaded() -> None:
+    global blaser_qe, text_embedder
+    if blaser_qe is not None and text_embedder is not None:
+        return
+
+    if load_blaser_model is None or TextToEmbeddingModelPipeline is None:
+        raise ModuleNotFoundError(
+            "BLASER dependencies are not installed. Install `sonar-space` and `fairseq2`, "
+            "or run with a metric that does not require BLASER."
+        )
+
+    blaser_qe = load_blaser_model("blaser_2_0_qe").eval()
+    text_embedder = TextToEmbeddingModelPipeline(
+        encoder="text_sonar_basic_encoder", tokenizer="text_sonar_basic_encoder"
+    )
 
 def get_blaser_score(x, y, src, tgt):
+    _ensure_blaser_models_loaded()
     src_embs = text_embedder.predict([x], source_lang=MAPPING_LANG_TO_KEY[src])
     ref_embs = text_embedder.predict([y], source_lang=MAPPING_LANG_TO_KEY[tgt])
     blaser_score = blaser_qe(src=src_embs, mt=ref_embs).item()
@@ -361,12 +417,17 @@ def main(args):
 
     if torch.cuda.is_available():
         device = torch.device("cuda")
-        per_device_batch_size = args.batch_size // torch.cuda.device_count()
+        per_device_batch_size = max(1, args.batch_size // torch.cuda.device_count())
     else:
         device = torch.device("cpu")
-        per_device_batch_size = args.batch_size
+        per_device_batch_size = max(1, args.batch_size)
 
     if args.metric == "comet":
+        if load_from_checkpoint is None or download_model is None:
+            raise ModuleNotFoundError(
+                "COMET is not installed. Install with `pip install unbabel-comet` "
+                "or run with `--metric metricx`/`--metric chrf`."
+            )
         model_path = download_model(args.model_name_or_path)
         print(f"COMET: {args.model_name_or_path, model_path}")
         model = load_from_checkpoint(model_path, local_files_only=True)
@@ -374,9 +435,16 @@ def main(args):
     elif args.metric == "metricx":
         tokenizer = transformers.AutoTokenizer.from_pretrained("google/mt5-xl")
         print(f"MetricX23: {args.model_name_or_path}")
-        model = MT5ForRegression.from_pretrained(
-            args.model_name_or_path, torch_dtype=torch.bfloat16
-        )
+        try:
+            model = MT5ForRegression.from_pretrained(
+                args.model_name_or_path, dtype=torch.bfloat16
+            )
+        except TypeError:
+            model = MT5ForRegression.from_pretrained(
+                args.model_name_or_path, torch_dtype=torch.bfloat16
+            )
+        # Avoid decoder cache-path quirks with newer transformers during pure forward eval.
+        model.config.use_cache = False
         model.to(device)
         model.eval()
 
@@ -389,7 +457,16 @@ def main(args):
             dataloader_pin_memory=False,
             report_to="none"
         )
-        trainer = transformers.Trainer(model=model, args=training_args,)
+        # Add data collator for proper dynamic padding.
+        data_collator = transformers.DataCollatorWithPadding(
+            tokenizer=tokenizer,
+            padding="longest",
+        )
+        trainer = transformers.Trainer(
+            model=model,
+            args=training_args,
+            data_collator=data_collator,
+        )
 
         # Datasets utilities
         def _make_input(example):
@@ -409,18 +486,36 @@ def main(args):
                 )
             return example
 
-        def _tokenize(example):
-            return tokenizer(
+        def _tokenize_metricx(example):
+            tokenized = tokenizer(
                 example["input"],
                 max_length=args.max_input_length,
                 truncation=True,
                 padding=False,
             )
+            input_ids = tokenized["input_ids"]
+            attention_mask = tokenized.get("attention_mask", [1] * len(input_ids))
 
-        def _remove_eos(example):
-            example["input_ids"] = example["input_ids"][:-1]
-            example["attention_mask"] = example["attention_mask"][:-1]
-            return example
+            # MetricX convention: drop trailing EOS when present.
+            if len(input_ids) > 1 and input_ids[-1] == tokenizer.eos_token_id:
+                input_ids = input_ids[:-1]
+
+            # Keep masks strictly aligned with token IDs.
+            seq_len = min(len(input_ids), len(attention_mask))
+            input_ids = input_ids[:seq_len]
+            attention_mask = attention_mask[:seq_len]
+
+            # Avoid zero-length encoder sequences.
+            if seq_len == 0:
+                pad_token_id = tokenizer.pad_token_id
+                if pad_token_id is None:
+                    pad_token_id = tokenizer.eos_token_id
+                input_ids = [pad_token_id]
+                attention_mask = [0]
+
+            tokenized["input_ids"] = input_ids
+            tokenized["attention_mask"] = attention_mask
+            return tokenized
 
     # Statistical significance parameters
     rng = np.random.default_rng(122)
@@ -529,7 +624,7 @@ def main(args):
                     pass
                 else:
                     store[target][strategy_key] = {}
-                k = int(features[3])
+                k = int(features[3]) if features[3] != 'None' else 0
                 if k in store[target][strategy_key]:
                     pass
                 else:
@@ -550,14 +645,14 @@ def main(args):
                                 "reference": targets,
                             }
                         )
-                    ds = ds.map(_make_input)
-                    ds = ds.map(_tokenize)
-                    ds = ds.map(_remove_eos)
-                    ds.set_format(
-                        type="torch",
-                        columns=["input_ids", "attention_mask"],
-                        device=device,
-                        output_all_columns=True,
+                    ds = ds.map(_make_input, load_from_cache_file=False)
+                    ds = ds.map(_tokenize_metricx, load_from_cache_file=False)
+                    ds = ds.remove_columns(
+                        [
+                            column
+                            for column in ds.column_names
+                            if column not in ["input_ids", "attention_mask"]
+                        ]
                     )
                     score_predictions, _, _ = trainer.predict(test_dataset=ds)
                     store[target][strategy_key][k]["scores"] = score_predictions

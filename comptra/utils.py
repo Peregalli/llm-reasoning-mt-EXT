@@ -163,7 +163,19 @@ def is_lang(sentence: str, lang: str):
         - lang :
             A language (e.g. English, French, German etc.)
     """
-    label, p = language_identifier.predict(sentence.strip().split("\n")[0])
+    text = sentence.strip().split("\n")[0]
+    try:
+        label, p = language_identifier.predict(text)
+    except ValueError as e:
+        # fasttext 0.9.x is not fully NumPy 2.x compatible (copy=False path).
+        if "Unable to avoid copy while creating an array as requested" not in str(e):
+            raise
+        _orig_array = np.array
+        np.array = lambda *a, **kw: _orig_array(*a, **{k: v for k, v in kw.items() if k != "copy"})
+        try:
+            label, p = language_identifier.predict(text)
+        finally:
+            np.array = _orig_array
     # print(f"probability: {p[0]}")
     label = label[0]
     return MAPPING_LANG_TO_KEY[lang] in label

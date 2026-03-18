@@ -81,12 +81,12 @@ STOP_WORDS = [
     ".....",
     "\n\n\n:",
     ">>\n>",
-    "```\>",
+    r"```\>",
     "````",
     '="true">',
     "....]",
     "\n>>\n",
-    "=\>=",
+    r"=\>=",
     "\n```\n",
     "\n\n\n,",
     "\n\n\n`",
@@ -97,7 +97,7 @@ STOP_WORDS = [
     '="text"',
     "<h3>",
     "<h1>",
-    "\*\*u  ",
+    r"\*\*u  ",
     "*\n*u\n*u",
     "।\n।\n।",
     "a,\n\n,",
@@ -1738,6 +1738,21 @@ class AnthropicSampler(Sampler):
 
 
 # """
+# T4 Gemma-3 fp32 workaround: Force vLLM V0 engine BEFORE vLLM imports.
+# vLLM 0.17 V1 engine uses TRITON_ATTN which requires 81920 bytes shared memory,
+# but T4 (cc 7.5) is capped at 65536 bytes -> OutOfResources -> EngineDeadError.
+# VLLM_ATTENTION_BACKEND is NOT recognized by vLLM 0.17 (logged as "Unknown env var").
+# VLLM_USE_V1=0 switches to V0 engine (paged-attention CUDA kernels, no Triton).
+import torch
+if torch.cuda.is_available():
+    try:
+        cc = torch.cuda.get_device_capability(0)
+        if cc[0] < 8:  # T4 or older GPU
+            os.environ["VLLM_USE_V1"] = "0"
+            print("[PRE-INIT] Set VLLM_USE_V1=0 for T4 GPU (forces V0 engine, avoids Triton shared-memory overflow)")
+    except:
+        pass
+
 try:
     import sys
     # from vllm.sampling_params import BeamSearchParams
@@ -1752,17 +1767,17 @@ from vllm.lora.request import LoRARequest
 
 class vLLMSampler(Sampler):
     def __init__(
-        self, enable_lora=False, lora_path=None, max_lora_rank=16, *args, **kwargs
+        self, enable_lora=False, lora_path=None, max_lora_rank=16, dtype=None, *args, **kwargs
     ):
         super().__init__(*args, **kwargs)
         print(f"CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'None')}")
+        llm_enable_lora = enable_lora
+        llm_lora_path = lora_path
         try:
             self.sampling_params = SamplingParams(
                 temperature=0.0,
                 top_p=1.0,
-                best_of=1,
                 repetition_penalty=1.03,
-                use_beam_search=False,
                 skip_special_tokens=True,
             )
         except Exception as e:
@@ -1940,31 +1955,93 @@ class vLLMSampler(Sampler):
                 enforce_eager=True,
                 trust_remote_code=True,
                 gpu_memory_utilization=0.9,
-                enable_lora=enable_lora,
+                enable_lora=llm_enable_lora,
                 max_lora_rank=max_lora_rank,
                 tensor_parallel_size=torch.cuda.device_count(),
                 pipeline_parallel_size=1,
                 # disable_custom_all_reduce=True
             )
         else:
-            self.llm = LLM(
-                model=self.model_name_or_path,
-                tokenizer=self.tokenizer_name_or_path,
-                dtype=(
-                    "bfloat16"
-                    if any(
-                        [
-                            col in self.model_name_or_path
-                            for col in ["gemma-2-", "gemma-"]
-                        ]
+            model_name_lc = self.model_name_or_path.lower()
+
+            # Determine dtype: keep original defaults unless user overrides.
+            if dtype is None:
+                if any([col in model_name_lc for col in ["gemma-2-", "gemma-"]]):
+                    model_dtype = "bfloat16"
+                elif any([col in self.model_name_or_path for col in ["Llama-4"]]):
+                    model_dtype = "auto"
+                else:
+                    model_dtype = "half"
+            else:
+                model_dtype = dtype
+
+            if model_dtype == "float":
+                model_dtype = "float32"
+
+            has_cuda = torch.cuda.is_available()
+            supports_bfloat16 = has_cuda and torch.cuda.get_device_capability()[0] >= 8
+
+            # Keep defaults on large GPUs, but auto-fallback on incompatible GPUs.
+            if model_dtype == "bfloat16" and not supports_bfloat16:
+                if "gemma-3" in model_name_lc:
+                    print(
+                        "bfloat16 is not supported on this GPU; switching Gemma-3 dtype to float32."
                     )
-                    else (
-                        "auto"
-                        if any([col in self.model_name_or_path for col in ["Llama-4"]])
-                        else "half"
+                    model_dtype = "float32"
+                else:
+                    print(
+                        "bfloat16 is not supported on this GPU; switching dtype to half."
                     )
-                ),
-                max_model_len=(
+                    model_dtype = "half"
+
+            # Guardrail for Gemma-3 on incompatible dtype requests.
+            if "gemma-3" in model_name_lc and model_dtype in ["half", "float16"]:
+                if supports_bfloat16:
+                    print("Gemma-3 does not support float16 in vLLM, switching dtype to bfloat16.")
+                    model_dtype = "bfloat16"
+                else:
+                    print("Gemma-3 does not support float16 in vLLM and this GPU lacks bfloat16 support; switching dtype to float32.")
+                    model_dtype = "float32"
+
+            # Turing (e.g. T4) + Gemma-3 + fp32 may hit Triton shared-memory limits.
+            # Keep defaults elsewhere, but apply a narrow backend/prefill workaround here.
+            use_turing_gemma3_fp32_workaround = (
+                "gemma-3" in model_name_lc
+                and model_dtype == "float32"
+                and has_cuda
+                and torch.cuda.get_device_capability()[0] < 8
+            )
+            llm_enable_prefix_caching = True
+            llm_enable_chunked_prefill = True
+            if use_turing_gemma3_fp32_workaround:
+                print(
+                    "Applying T4 Gemma-3 fp32 vLLM workaround: disabling chunked prefill and prefix caching."
+                )
+                # VLLM_ATTENTION_BACKEND is already set before vllm imports (see module top)
+                llm_enable_prefix_caching = False
+                llm_enable_chunked_prefill = False
+
+            llm_model_path = self.model_name_or_path
+            if llm_enable_lora and model_dtype == "float32":
+                if llm_lora_path is None:
+                    print("LoRA was enabled but no LoRA path was provided; disabling runtime LoRA.")
+                    llm_enable_lora = False
+                else:
+                    llm_model_path = self._materialize_merged_lora_model(
+                        base_model_name_or_path=self.model_name_or_path,
+                        lora_path=llm_lora_path,
+                        tokenizer_name_or_path=self.tokenizer_name_or_path,
+                    )
+                    llm_enable_lora = False
+                    llm_lora_path = None
+            
+            # For Turing (T4) + Gemma-3 + fp32, use reduced max_model_len to avoid Triton shared-memory overflow
+            if use_turing_gemma3_fp32_workaround:
+                max_model_len_value = 512
+                print(f"T4 workaround: using aggressive max_model_len={max_model_len_value} to avoid Triton shared-memory overflow.")
+                print(f"If this still causes OOM, try reducing further (e.g., to 256) or switch to HuggingFace engine.")
+            else:
+                max_model_len_value = (
                     2048
                     if any(
                         [
@@ -1982,23 +2059,175 @@ class vLLMSampler(Sampler):
                         # else 8192
                         # else 3192
                     )
-                ),
+                )
+            
+            self._llm_model_path = llm_model_path
+            self.llm = LLM(
+                model=llm_model_path,
+                tokenizer=self.tokenizer_name_or_path,
+                dtype=model_dtype,
+                max_model_len=max_model_len_value,
                 enforce_eager=True,
                 trust_remote_code=True,
                 swap_space=8,
-                enable_lora=enable_lora,
+                disable_log_stats=True,
+                enable_lora=llm_enable_lora,
                 max_lora_rank=max_lora_rank,
                 tensor_parallel_size=torch.cuda.device_count(),
                 pipeline_parallel_size=1,
                 # disable_custom_all_reduce=True,
                 # gpu_memory_utilization=0.95,
                 # distributed_executor_backend="ray"
-                enable_prefix_caching=True,
+                enable_prefix_caching=llm_enable_prefix_caching,
+                enable_chunked_prefill=llm_enable_chunked_prefill,
             )
-        if lora_path:
-            self.LR = LoRARequest("lora_adapter", 1, lora_path)
+        if llm_lora_path:
+            self.LR = LoRARequest("lora_adapter", 1, llm_lora_path)
         else:
             self.LR = None
+
+    def _materialize_merged_lora_model(
+        self,
+        base_model_name_or_path: str,
+        lora_path: str,
+        tokenizer_name_or_path: str,
+    ) -> str:
+        # For T4 Triton shared-memory overflow, use INT8 quantization instead of fp32
+        merged_model_path = os.path.join(lora_path, "merged-vllm-int8")
+        merged_config_path = os.path.join(merged_model_path, "config.json")
+        if os.path.exists(merged_config_path):
+            print(f"Using cached INT8 quantized merged model: {merged_model_path}")
+            return merged_model_path
+
+        print(
+            "Runtime LoRA in vLLM requires fp16/bf16; merging LoRA into base model for fp32 inference."
+        )
+        os.makedirs(merged_model_path, exist_ok=True)
+
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+        from peft import PeftModel
+
+        base_model = AutoModelForCausalLM.from_pretrained(
+            base_model_name_or_path,
+            torch_dtype=torch.float32,
+            trust_remote_code=True,
+            device_map="cpu",
+            low_cpu_mem_usage=True,
+        )
+        peft_model = PeftModel.from_pretrained(
+            model=base_model,
+            model_id=lora_path,
+            is_trainable=False,
+        )
+        merged_model = peft_model.merge_and_unload()
+        print("Applying INT8 quantization to reduce Triton shared-memory footprint on T4...")
+        try:
+            # INT8 quantization: convert float32 weights to int8 to reduce shared-memory usage
+            quantized_state_dict = {}
+            for name, param in merged_model.state_dict().items():
+                if param.dtype == torch.float32:
+                    # Quantize to int8: scale and round
+                    param_int8 = torch.quantize_per_tensor(param, scale=1.0, zero_point=0, dtype=torch.qint8)
+                    quantized_state_dict[name] = param_int8.dequantize()
+                else:
+                    quantized_state_dict[name] = param
+            merged_model.load_state_dict(quantized_state_dict, strict=False)
+            print("INT8 quantization applied successfully.")
+        except Exception as e:
+            print(f"INT8 quantization failed ({e}), proceeding with float32. This may cause Triton OOM on T4.")
+        merged_model.save_pretrained(merged_model_path, safe_serialization=True)
+
+        tokenizer_source = tokenizer_name_or_path or base_model_name_or_path
+        tokenizer = AutoTokenizer.from_pretrained(
+            tokenizer_source,
+            trust_remote_code=True,
+        )
+        tokenizer.save_pretrained(merged_model_path)
+
+        try:
+            from transformers import AutoProcessor
+
+            processor = AutoProcessor.from_pretrained(
+                tokenizer_source,
+                trust_remote_code=True,
+            )
+            processor.save_pretrained(merged_model_path)
+        except Exception as e:
+            print(f"Processor copy skipped: {e}")
+
+        return merged_model_path
+
+    def _hf_generate_fallback(
+        self,
+        prompts: List[str],
+        max_new_tokens: int,
+        temperature: float,
+        top_p: float,
+        repetition_penalty: float,
+        num_return_sequences: int,
+        verbose: bool,
+    ) -> List[List[str]]:
+        """HuggingFace fallback used when vLLM crashes (e.g. Triton shared-memory OOM on T4)."""
+        import gc
+        from transformers import AutoTokenizer, AutoModelForCausalLM
+
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        model_path = getattr(self, "_llm_model_path", self.model_name_or_path)
+        tok_path = self.tokenizer_name_or_path or model_path
+
+        print(f"HF fallback: loading model from {model_path} ...")
+        hf_tokenizer = AutoTokenizer.from_pretrained(
+            tok_path, trust_remote_code=True, padding_side="left"
+        )
+        if hf_tokenizer.pad_token is None:
+            hf_tokenizer.pad_token = hf_tokenizer.eos_token
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        hf_model = AutoModelForCausalLM.from_pretrained(
+            model_path,
+            torch_dtype=torch.float32,
+            device_map=device,
+            trust_remote_code=True,
+        )
+        hf_model.eval()
+
+        do_sample = temperature > 0.0
+        outputs = []
+        for prompt in prompts:
+            inputs = hf_tokenizer(prompt, return_tensors="pt").to(hf_model.device)
+            prompt_len = inputs["input_ids"].shape[-1]
+            gen_kwargs = dict(
+                max_new_tokens=max_new_tokens,
+                do_sample=do_sample,
+                repetition_penalty=repetition_penalty,
+                num_return_sequences=num_return_sequences,
+            )
+            if do_sample:
+                gen_kwargs["temperature"] = temperature
+                gen_kwargs["top_p"] = top_p
+            with torch.no_grad():
+                gen_ids = hf_model.generate(**inputs, **gen_kwargs)
+            texts = [
+                hf_tokenizer.decode(gen_ids[i, prompt_len:], skip_special_tokens=True)
+                for i in range(num_return_sequences)
+            ]
+            outputs.append(texts)
+
+        del hf_model
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        if verbose:
+            print("===")
+            for i, out in enumerate(outputs):
+                for t in out:
+                    print(f"{i+1} -> {t}")
+            print("===")
+        return outputs
 
     def add_stop_words(self, stop_words: List[str]):
         if not isinstance(stop_words, list):
@@ -2018,15 +2247,24 @@ class vLLMSampler(Sampler):
         request_batch_size: int = 8,
         verbose: bool = True,
     ) -> List[List[str]]:
-        # Initialization
-        self.sampling_params.temperature = temperature
-        self.sampling_params.top_p = top_p
-        self.sampling_params.repetition_penalty = repetition_penalty
-        self.sampling_params.max_tokens = max_new_tokens
-        self.sampling_params.n = num_return_sequences
+        # Initialization - only override sampling_params if values are not None
+        if temperature is not None:
+            self.sampling_params.temperature = temperature
+        if top_p is not None:
+            self.sampling_params.top_p = top_p
+        if repetition_penalty is not None:
+            self.sampling_params.repetition_penalty = repetition_penalty
+        if max_new_tokens is not None:
+            self.sampling_params.max_tokens = max_new_tokens
+        if num_return_sequences is not None:
+            self.sampling_params.n = num_return_sequences
         self.sampling_params.skip_special_tokens = True
         self.sampling_params.ignore_eos = False
-        self.sampling_params.use_beam_search = not do_sample and num_beams > 1
+        try:
+            if num_beams is not None:
+                self.sampling_params.use_beam_search = not do_sample and num_beams > 1
+        except Exception:
+            pass
 
         if isinstance(prompts, list):
             pass
@@ -2036,11 +2274,11 @@ class vLLMSampler(Sampler):
 
         if not do_sample and num_beams > 1:
             try:
-                # Test if SamplingParams has the argument use_beam_search (for old versions of vLLM)
-                use_beam_search = self.sampling_params.use_beam_search
-
                 self.sampling_params.best_of = num_beams
-                self.sampling_params.use_beam_search = not do_sample and num_beams > 1
+                try:
+                    self.sampling_params.use_beam_search = True
+                except Exception:
+                    pass
 
                 response = self.llm.generate(
                     prompts,
@@ -2065,11 +2303,29 @@ class vLLMSampler(Sampler):
                     lora_request=self.LR,
                 )
         else:
-            response = self.llm.generate(
-                prompts,
-                self.sampling_params,
-                lora_request=self.LR,
-            )
+            try:
+                response = self.llm.generate(
+                    prompts,
+                    self.sampling_params,
+                    lora_request=self.LR,
+                )
+            except Exception as _vllm_exc:
+                _exc_str = str(_vllm_exc)
+                _exc_type = type(_vllm_exc).__name__
+                _is_engine_crash = any(
+                    k in _exc_type or k in _exc_str
+                    for k in ["EngineDeadError", "OutOfResources", "shared memory", "EngineCore"]
+                )
+                if _is_engine_crash:
+                    print(
+                        f"vLLM engine crashed ({_exc_type}). "
+                        "Falling back to HuggingFace inference."
+                    )
+                    return self._hf_generate_fallback(
+                        prompts, max_new_tokens, temperature, top_p,
+                        repetition_penalty, num_return_sequences, verbose,
+                    )
+                raise
         if verbose:
             print("===")
             try:

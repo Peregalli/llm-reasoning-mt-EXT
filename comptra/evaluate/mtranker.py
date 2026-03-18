@@ -212,7 +212,18 @@ def main(args):
                     - lang :
                         A language (e.g. English, French, German etc.)
                 """
-                label, _ = language_identifier.predict(sentence.split("\n")[0])
+                text = sentence.split("\n")[0]
+                try:
+                    label, _ = language_identifier.predict(text)
+                except ValueError as e:
+                    if "Unable to avoid copy while creating an array as requested" not in str(e):
+                        raise
+                    _orig_array = np.array
+                    np.array = lambda *a, **kw: _orig_array(*a, **{k: v for k, v in kw.items() if k != "copy"})
+                    try:
+                        label, _ = language_identifier.predict(text)
+                    finally:
+                        np.array = _orig_array
                 label = label[0]
                 return MAPPING_LANG_TO_KEY[lang] in label
             
