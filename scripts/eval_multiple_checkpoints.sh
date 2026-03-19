@@ -16,8 +16,8 @@ for ckpt in "$@"; do
     exit 1
   fi
 
-  MODEL_CKPT_PATH="./checkpoints-qwen24-15-xho/checkpoint-${ckpt}"
-  NLLB_CKPT_PATH="./checkpoints-qwen24-15-xho/checkpoint-${ckpt}"
+  MODEL_CKPT_PATH="./checkpoints-qwen25-15-xho/checkpoint-${ckpt}"
+  NLLB_CKPT_PATH="./checkpoints-qwen25-15-xho/checkpoint-${ckpt}"
 
   echo "============================================================"
   echo "Running evaluation for checkpoint-${ckpt}"
@@ -27,27 +27,30 @@ for ckpt in "$@"; do
 
   python evaluation.py \
     --model_name_or_path "${MODEL_CKPT_PATH}" \
-    --tokenizer_name_or_path Qwen/Qwen2.5-1.5B-Instruct \
-    --base_model_name_or_path Qwen/Qwen2.5-1.5B-Instruct \
+    --tokenizer_name_or_path Qwen/Qwen2.5-1.5B \
+    --base_model_name_or_path Qwen/Qwen2.5-1.5B \
     --src English \
     --tgt Xhosa \
     --request_batch_size 64 \
     --inference_api vllm \
-    --max_samples 1012 \
+    --max_samples 300 \
     --num_return_sequences 1 \
     --num_beams 1 \
+    --max_new_tokens 2768\
     --temperature 0.0 \
     --top_p 1.0 \
+    --k 0\
     --repetition_penalty 1.0 \
-    --output_dir predictions/IOFT-qwen/ \
+    --output_dir predictions/IOFT-qwen_24-15/ \
     --seed 42 \
-    --method_divide identity \
+    --method_divide llm \
     --merge_prompt vanilla \
     --method_translate vanilla \
     --selection_method greedy \
     --steps 0 \
     --verbose \
     --number_of_subproblems 0 \
+    --number_of_refining_steps 0\
     --template_key 14 \
     --retriever_type bm25s \
     --dataset_name_or_path flores \
