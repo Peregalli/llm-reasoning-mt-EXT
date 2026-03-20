@@ -285,7 +285,7 @@ def apply_chat_template(model_name_or_path: str):
     elif model_name_or_path in [
         "Qwen/Qwen2.5-7B-Instruct",
         "Qwen/Qwen2.5-32B-Instruct",
-    ]:
+    ] or (model_name_or_path.startswith("Qwen/") and model_name_or_path.endswith("Instruct")):
 
         def f(messages):
             if isinstance(messages, str):
@@ -322,7 +322,7 @@ def apply_chat_template(model_name_or_path: str):
         "Qwen/Qwen3-8B",
         "Qwen/Qwen3-32B",
         "Qwen/Qwen3-235B-A22B",
-    ]:
+    ] or (model_name_or_path.startswith("Qwen/") and not model_name_or_path.endswith("Instruct")):
         # def f(messages, thinking=False):
         def f(messages, thinking=True):
             if isinstance(messages, str):
