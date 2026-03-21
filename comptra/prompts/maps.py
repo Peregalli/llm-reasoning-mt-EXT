@@ -212,7 +212,7 @@ def get_trigger_sents(src: str = "English"):
     """
     if src in LANG_TO_CODE:
         return TRIGGER_SENTS[LANG_TO_CODE[src]]
-    ds_src = load_dataset("facebook/flores", MAPPING_LANG_TO_KEY[src])["dev"].select(
+    ds_src = load_dataset("facebook/flores", MAPPING_LANG_TO_KEY[src], trust_remote_code=True)["dev"].select(
         [0, 2, 5, 7, 147]
     )
     return [example["sentence"] for example in ds_src]
@@ -237,14 +237,14 @@ def get_demo_sents(src: str = "English", tgt: str = "Swahili"):
     if src in LANG_TO_CODE:
         src_sents = DEMO_SENTS[LANG_TO_CODE[src]]
     else:
-        ds_src = load_dataset("facebook/flores", MAPPING_LANG_TO_KEY[src])[
+        ds_src = load_dataset("facebook/flores", MAPPING_LANG_TO_KEY[src], trust_remote_code=True)[
             "dev"
         ].select([1, 3, 6, 8, 145])
         src_sents = [example["sentence"] for example in ds_src]
     if tgt in LANG_TO_CODE and tgt not in MORE_CODES:
         tgt_sents = DEMO_SENTS[LANG_TO_CODE[tgt]]
     else:
-        ds_tgt = load_dataset("facebook/flores", MAPPING_LANG_TO_KEY[tgt])[
+        ds_tgt = load_dataset("facebook/flores", MAPPING_LANG_TO_KEY[tgt], trust_remote_code=True)[
             "dev"
         ].select([1, 3, 6, 8, 145])
         tgt_sents = [example["sentence"] for example in ds_tgt]

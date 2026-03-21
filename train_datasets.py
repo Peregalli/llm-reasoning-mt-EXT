@@ -92,9 +92,9 @@ def get_flores(
     size: int = None,
 ):
     list_of_datasets = []
-    ds_src = load_dataset("facebook/flores", MAPPING_LANG_TO_KEY[src])
+    ds_src = load_dataset("facebook/flores", MAPPING_LANG_TO_KEY[src], trust_remote_code=True)
     for language in languages:
-        ds_tgt = load_dataset("facebook/flores", MAPPING_LANG_TO_KEY[language])
+        ds_tgt = load_dataset("facebook/flores", MAPPING_LANG_TO_KEY[language], trust_remote_code=True)
         dataset = Dataset.from_dict(
             {
                 "source": ds_src["dev"]["sentence"],
