@@ -1929,8 +1929,20 @@ def _load_translation_pairs(args, languages):
                     if args.max_samples is not None and j >= args.max_samples:
                         break
                     data = json.loads(line)
-                    dico_of_inputs[languages[i]].append(data["translation"])
-                    dico_of_translations[languages[i]].append(data["sentence"])
+                    if "translation" in data and "sentence" in data:
+                        dico_of_inputs[languages[i]].append(data["translation"])
+                        dico_of_translations[languages[i]].append(data["sentence"])
+                    elif "translations" in data and "propositions" in data:
+                        dico_of_inputs[languages[i]].extend(data["translations"])
+                        dico_of_translations[languages[i]].extend(
+                            data["propositions"]
+                        )
+                    else:
+                        raise KeyError(
+                            f"Unsupported input schema in {full_path}. "
+                            "Expected either {'sentence','translation'} "
+                            "or {'propositions','translations'}."
+                        )
     return dico_of_inputs, dico_of_translations
 
 
