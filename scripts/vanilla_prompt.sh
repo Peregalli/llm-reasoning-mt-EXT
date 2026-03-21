@@ -1,0 +1,21 @@
+python paraphrase.py \
+  --strategy vanilla_prompt \
+  --model_name_or_path gpt-4o-mini \
+  --tokenizer_name_or_path gpt-4o-mini \
+  --inference_api openai \
+  --request_batch_size 1 \
+  --seed 122 \
+  --max_new_tokens 256 \
+  --temperature 0.3 \
+  --top_p 0.95 \
+  --repetition_penalty 1.0 \
+  --num_return_sequences 1 \
+  --num_beams 1 \
+  --do_sample \
+  --verbose \
+  --languages Xhosa \
+  --input_filenames Xhosa.jsonl \
+  --input_dir /content/llm-reasoning-mt-EXT/data/Llama-4-Scout-17B-16E-Instruct/T=1.0 \
+  --output_dir /content/drive/MyDrive/NLP_outputs/vanilla_openai \
+  --source_language English \
+  --max_samples 10

@@ -1855,6 +1855,22 @@ Candidate translations:
 """.strip()
 
 
+def get_vanilla_translation_prompt(sentence, src, tgt):
+    return f"""
+You are a professional machine translation system translating from {src} to {tgt}.
+
+Translate the source sentence into {tgt}.
+
+Rules:
+- Preserve the meaning of the source sentence.
+- Output only the final translation.
+- Do not explain your answer.
+
+Source sentence:
+{sentence}
+""".strip()
+
+
 def extract_tagged_drafts(text, styles):
     drafts = {}
     for style in styles:
@@ -2059,6 +2075,75 @@ def tenth(args):
                                 "drafts": draft_bundles[idx],
                                 "raw_drafts": raw_draft_outputs[idx],
                                 "final_translation": merge_outputs[idx][0].strip(),
+                            },
+                            ensure_ascii=False,
+                        )
+                        + "\n"
+                    )
+    print("END")
+
+
+def eleventh(args):
+    languages = args.languages
+    print(f"LANGUAGES: {languages}")
+
+    template_key, arguments, generation_kwargs = _build_generation_context(
+        args, languages[0]
+    )
+    sampler = _create_sampler(args, arguments)
+    dico_of_inputs, dico_of_translations = _load_translation_pairs(args, languages)
+
+    if args.output_dir:
+        output_dir = args.output_dir
+    else:
+        output_dir = os.path.join(args.input_dir, args.model_name_or_path.split("/")[-1])
+    os.makedirs(output_dir, exist_ok=True)
+
+    for language in languages:
+        output_filename = os.path.join(
+            output_dir, f"{language}_paraphrase_vanilla_prompt.jsonl"
+        )
+        start = 0
+        if os.path.exists(output_filename):
+            with open(output_filename, "r", encoding="utf-8") as fin:
+                for _ in fin:
+                    start += 1
+
+        sampler.update_template(
+            get_template(key=template_key, src=args.source_language, tgt=language)
+        )
+        sampler.update_src(args.source_language)
+        sampler.update_tgt(language)
+
+        for j in range(start, len(dico_of_inputs[language]), args.request_batch_size):
+            batch_of_inputs = dico_of_inputs[language][j : j + args.request_batch_size]
+            batch_of_translations = dico_of_translations[language][
+                j : j + args.request_batch_size
+            ]
+
+            prompts = [
+                get_vanilla_translation_prompt(
+                    sentence=sentence,
+                    src=args.source_language,
+                    tgt=language,
+                )
+                for sentence in batch_of_inputs
+            ]
+            outputs = sampler.generate(
+                [sampler.apply_chat_template(prompt) for prompt in prompts],
+                **generation_kwargs,
+            )
+
+            with open(output_filename, "a", encoding="utf-8") as fout:
+                for idx in range(len(batch_of_inputs)):
+                    raw_output = outputs[idx][0].strip()
+                    fout.write(
+                        json.dumps(
+                            {
+                                "sentence": batch_of_inputs[idx],
+                                "translation": batch_of_translations[idx],
+                                "raw_translation": raw_output,
+                                "final_translation": raw_output,
                             },
                             ensure_ascii=False,
                         )
@@ -2685,3 +2770,5 @@ if __name__ == "__main__":
         ninth(args)  # NLLB
     elif args.strategy == "multidraft":
         tenth(args)  # Multi-draft diversity
+    elif args.strategy == "vanilla_prompt":
+        eleventh(args)  # Vanilla prompt-only baseline
