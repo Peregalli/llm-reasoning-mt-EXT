@@ -3,8 +3,6 @@ from datasets import load_dataset
 from comptra.languages import MAPPING_LANG_TO_KEY
 from comptra.prompts.templates import get_template
 from comptra.sampler import *
-from comptra.retriever import Retriever
-
 from tqdm import tqdm
 import numpy as np
 import time
@@ -252,6 +250,8 @@ def get_prompt_main(sentence, number, mode):
 
 
 def main(args):
+    from comptra.retriever import Retriever
+
     rng = np.random.default_rng(args.seed)
     languages = args.languages
     print(f"LANGUAGES: {languages}")
@@ -556,6 +556,8 @@ def get_prompt_2(sentence, number, lang):
 
 
 def second(args):
+    from comptra.retriever import Retriever
+
     rng = np.random.default_rng(args.seed)
     languages = args.languages
     print(f"LANGUAGES: {languages}")
@@ -1423,6 +1425,8 @@ def fifth(args):
 
 
 def sixth(args):
+    from comptra.retriever import Retriever
+
     rng = np.random.default_rng(args.seed)
     languages = args.languages
     print(f"LANGUAGES: {languages}")
@@ -2377,6 +2381,8 @@ def get_cot(sentence, translation, src, tgt, cot_template):
 
 
 def eight(args):
+    from comptra.retriever import Retriever
+
     rng = np.random.default_rng(args.seed)
     languages = args.languages
     print(f"LANGUAGES: {languages}")
