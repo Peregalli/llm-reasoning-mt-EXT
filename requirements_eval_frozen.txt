@@ -128,7 +128,7 @@ networkx==3.4.2
 ninja==1.13.0
 nltk==3.9.3
 numba==0.61.2
-numpy==2.2.6
+numpy==1.26.4
 nvidia-cublas-cu12==12.8.4.1
 nvidia-cuda-cupti-cu12==12.8.90
 nvidia-cuda-nvrtc-cu12==12.8.93
@@ -166,7 +166,7 @@ prometheus-client==0.24.1
 prometheus-fastapi-instrumentator==7.1.0
 propcache==0.4.1
 proto-plus==1.27.1
-protobuf==4.25.8
+protobuf==3.20.3
 psutil==5.9.8
 py-cpuinfo==9.0.0
 pyarrow==23.0.1
