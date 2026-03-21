@@ -1504,14 +1504,10 @@ class HFSampler(Sampler):
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_name_or_path,
             device_map={"": self.accelerator.process_index},
-            torch_dtype=torch.bfloat16,
+            torch_dtype=torch.float16,
             # load_in_8bit=True,
             trust_remote_code=True,
-            attn_implementation=(
-                "eager"
-                if "gemma-2-" in self.model_name_or_path
-                else "flash_attention_2"
-            ),
+            attn_implementation="eager",
         )
 
     def generate(
