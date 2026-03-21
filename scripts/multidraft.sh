@@ -1,0 +1,23 @@
+python paraphrase.py \
+  --strategy multidraft \
+  --model_name_or_path Qwen/Qwen2.5-1.5B-Instruct \
+  --tokenizer_name_or_path Qwen/Qwen2.5-1.5B-Instruct \
+  --inference_api hf \
+  --request_batch_size 4 \
+  --seed 122 \
+  --max_new_tokens 256 \
+  --temperature 0.3 \
+  --top_p 0.95 \
+  --repetition_penalty 1.0 \
+  --num_return_sequences 1 \
+  --num_beams 1 \
+  --do_sample \
+  --verbose \
+  --languages Xhosa \
+  --input_filenames Xhosa.jsonl \
+  --input_dir data/Llama-4-Scout-17B-16E-Instruct/T=1.0 \
+  --output_dir data/Llama-4-Scout-17B-16E-Instruct/T=1.0/multidraft-qwen15b \
+  --source_language English \
+  --number_of_generations_per_step 3 \
+  --draft_styles faithful fluent balanced \
+  --max_samples 100

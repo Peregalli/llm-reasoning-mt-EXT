@@ -119,6 +119,17 @@ def parse_args():
     parser.add_argument(
         "--strategy", type=str, help="Which strategy to use.", default="maps"
     )
+    parser.add_argument(
+        "--draft_styles",
+        nargs="+",
+        default=["faithful", "fluent", "balanced"],
+        help="Style labels used by the multidraft strategy.",
+    )
+    parser.add_argument(
+        "--independent_generation",
+        action="store_true",
+        help="Generate each multidraft candidate in a separate call instead of a single pass.",
+    )
     return parser.parse_args()
 
 
@@ -1774,6 +1785,272 @@ def get_prompt(sentence, number, mode):
         return PARAPHRASE_1.format(number=number).strip() + f"\nSentence\n{sentence}"
 
 
+def get_multidraft_prompt(sentence, src, tgt, styles):
+    numbered_styles = "\n".join(
+        [f"{i + 1}. {style}" for i, style in enumerate(styles)]
+    )
+    tagged_styles = "\n".join(
+        [
+            f'<draft style="{style}">\n...\n</draft>'
+            for style in styles
+        ]
+    )
+    return f"""
+You are a professional machine translation system translating from {src} to {tgt}.
+
+Generate {len(styles)} different, high-quality {tgt} translations of the source sentence.
+Each draft must preserve the meaning of the source sentence, but follow a different translation preference:
+{numbered_styles}
+
+Rules:
+- Write exactly one translation for each style.
+- Do not explain your choices.
+- Do not number the drafts.
+- Use exactly this XML-like format and nothing else:
+{tagged_styles}
+
+Source sentence:
+{sentence}
+""".strip()
+
+
+def get_single_draft_prompt(sentence, src, tgt, style):
+    return f"""
+You are a professional machine translation system translating from {src} to {tgt}.
+
+Translate the source sentence into {tgt}. The translation should follow this preference: {style}.
+
+Rules:
+- Preserve the meaning of the source sentence.
+- Output only the final translation.
+
+Source sentence:
+{sentence}
+""".strip()
+
+
+def get_multidraft_merge_prompt(sentence, src, tgt, drafts):
+    candidates = "\n\n".join(
+        [f"[{style}]\n{drafts[style]}" for style in drafts if drafts[style].strip() != ""]
+    )
+    return f"""
+You are a professional machine translation system translating from {src} to {tgt}.
+
+Below are several candidate {tgt} translations of the same source sentence. Produce the single best final translation by combining their strengths and correcting any errors or awkward phrasing.
+
+Rules:
+- Preserve the meaning of the source sentence.
+- Output only one final translation.
+- Do not explain your answer.
+
+Source sentence:
+{sentence}
+
+Candidate translations:
+{candidates}
+""".strip()
+
+
+def extract_tagged_drafts(text, styles):
+    drafts = {}
+    for style in styles:
+        pattern = (
+            rf'<draft style="{re.escape(style)}">\s*(.*?)\s*</draft>'
+        )
+        match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
+        drafts[style] = match.group(1).strip() if match else ""
+    return drafts
+
+
+def _build_generation_context(args, first_target_language):
+    template_key = args.template_key if args.template_key is not None else 11
+    arguments = {
+        "model_name_or_path": args.model_name_or_path,
+        "tokenizer_name_or_path": args.tokenizer_name_or_path,
+        "src": args.source_language,
+        "tgt": first_target_language,
+        "template": get_template(
+            key=template_key, src=args.source_language, tgt=first_target_language
+        ),
+        "merge_prompt": "vanilla",
+        "selection_method": "greedy",
+        "method_translate": "vanilla",
+        "nllb_name_or_path": None,
+        "method_divide": None,
+    }
+    generation_kwargs = {
+        "max_new_tokens": args.max_new_tokens,
+        "temperature": args.temperature,
+        "top_p": args.top_p,
+        "repetition_penalty": args.repetition_penalty,
+        "num_return_sequences": args.num_return_sequences,
+        "num_beams": args.num_beams,
+        "do_sample": args.do_sample,
+        "request_batch_size": args.request_batch_size,
+        "verbose": args.verbose,
+    }
+    return template_key, arguments, generation_kwargs
+
+
+def _create_sampler(args, arguments):
+    if args.inference_api == "vllm":
+        return vLLMSampler(**arguments)
+    if args.inference_api == "openai":
+        return OpenAISampler(api_key=args.api_key, **arguments)
+    if args.inference_api == "anthropic":
+        return AnthropicSampler(**arguments)
+    if args.inference_api == "cohere":
+        return cohereSampler(**arguments)
+    if args.inference_api == "hf":
+        return HFSampler(**arguments)
+    return Sampler(**arguments)
+
+
+def _load_translation_pairs(args, languages):
+    input_filenames = (
+        args.input_filenames
+        if args.input_filenames is not None
+        else [f"{language}.jsonl" for language in languages]
+    )
+    assert len(input_filenames) == len(
+        languages
+    ), f"The number of input filenames ({len(input_filenames)}) should match the number of languages ({len(languages)})."
+    dico_of_inputs = {language: [] for language in languages}
+    dico_of_translations = {language: [] for language in languages}
+    for i, input_filename in enumerate(input_filenames):
+        full_path = os.path.join(args.input_dir, input_filename)
+        if os.path.exists(full_path):
+            with open(full_path, "r", encoding="utf-8") as fin:
+                for j, line in enumerate(fin):
+                    if args.max_samples is not None and j >= args.max_samples:
+                        break
+                    data = json.loads(line)
+                    dico_of_inputs[languages[i]].append(data["translation"])
+                    dico_of_translations[languages[i]].append(data["sentence"])
+    return dico_of_inputs, dico_of_translations
+
+
+def tenth(args):
+    languages = args.languages
+    print(f"LANGUAGES: {languages}")
+
+    if args.number_of_generations_per_step is None:
+        number_of_drafts = len(args.draft_styles)
+    else:
+        number_of_drafts = args.number_of_generations_per_step
+    styles = args.draft_styles[:number_of_drafts]
+    if len(styles) < number_of_drafts:
+        raise ValueError(
+            "The number of provided draft styles must match number_of_generations_per_step."
+        )
+
+    template_key, arguments, generation_kwargs = _build_generation_context(
+        args, languages[0]
+    )
+    sampler = _create_sampler(args, arguments)
+    dico_of_inputs, dico_of_translations = _load_translation_pairs(args, languages)
+
+    if args.output_dir:
+        output_dir = args.output_dir
+    else:
+        output_dir = os.path.join(args.input_dir, args.model_name_or_path.split("/")[-1])
+    os.makedirs(output_dir, exist_ok=True)
+
+    for language in languages:
+        output_filename = os.path.join(output_dir, f"{language}_paraphrase_multidraft.jsonl")
+        start = 0
+        if os.path.exists(output_filename):
+            with open(output_filename, "r", encoding="utf-8") as fin:
+                for _ in fin:
+                    start += 1
+
+        sampler.update_template(
+            get_template(key=template_key, src=args.source_language, tgt=language)
+        )
+        sampler.update_src(args.source_language)
+        sampler.update_tgt(language)
+
+        for j in range(start, len(dico_of_inputs[language]), args.request_batch_size):
+            batch_of_inputs = dico_of_inputs[language][j : j + args.request_batch_size]
+            batch_of_translations = dico_of_translations[language][
+                j : j + args.request_batch_size
+            ]
+
+            if args.independent_generation:
+                draft_bundles = [{style: "" for style in styles} for _ in batch_of_inputs]
+                raw_draft_outputs = [{style: "" for style in styles} for _ in batch_of_inputs]
+                for style in styles:
+                    prompts = [
+                        get_single_draft_prompt(
+                            sentence=sentence,
+                            src=args.source_language,
+                            tgt=language,
+                            style=style,
+                        )
+                        for sentence in batch_of_inputs
+                    ]
+                    outputs = sampler.generate(
+                        [sampler.apply_chat_template(prompt) for prompt in prompts],
+                        **generation_kwargs,
+                    )
+                    for idx, output in enumerate(outputs):
+                        value = output[0].strip()
+                        draft_bundles[idx][style] = value
+                        raw_draft_outputs[idx][style] = value
+            else:
+                prompts = [
+                    get_multidraft_prompt(
+                        sentence=sentence,
+                        src=args.source_language,
+                        tgt=language,
+                        styles=styles,
+                    )
+                    for sentence in batch_of_inputs
+                ]
+                outputs = sampler.generate(
+                    [sampler.apply_chat_template(prompt) for prompt in prompts],
+                    **generation_kwargs,
+                )
+                draft_bundles = []
+                raw_draft_outputs = []
+                for output in outputs:
+                    raw_text = output[0].strip()
+                    draft_bundles.append(extract_tagged_drafts(raw_text, styles))
+                    raw_draft_outputs.append(raw_text)
+
+            merge_prompts = [
+                get_multidraft_merge_prompt(
+                    sentence=batch_of_inputs[idx],
+                    src=args.source_language,
+                    tgt=language,
+                    drafts=draft_bundles[idx],
+                )
+                for idx in range(len(batch_of_inputs))
+            ]
+            merge_outputs = sampler.generate(
+                [sampler.apply_chat_template(prompt) for prompt in merge_prompts],
+                **generation_kwargs,
+            )
+
+            with open(output_filename, "a", encoding="utf-8") as fout:
+                for idx in range(len(batch_of_inputs)):
+                    fout.write(
+                        json.dumps(
+                            {
+                                "sentence": batch_of_inputs[idx],
+                                "translation": batch_of_translations[idx],
+                                "draft_styles": styles,
+                                "drafts": draft_bundles[idx],
+                                "raw_drafts": raw_draft_outputs[idx],
+                                "final_translation": merge_outputs[idx][0].strip(),
+                            },
+                            ensure_ascii=False,
+                        )
+                        + "\n"
+                    )
+    print("END")
+
+
 def seventh(args):
     languages = args.languages
     print(f"LANGUAGES: {languages}")
@@ -2388,3 +2665,5 @@ if __name__ == "__main__":
         eight(args)  # CoT
     elif args.strategy == "nllb":
         ninth(args)  # NLLB
+    elif args.strategy == "multidraft":
+        tenth(args)  # Multi-draft diversity
