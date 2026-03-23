@@ -84,6 +84,59 @@ def get_extended_paraphrase(
 
     return Dataset.from_dict(expanded_rows)
 
+
+def combine_original_and_extended_paraphrase(
+    original_dataset: Dataset,
+    extended_dataset: Dataset,
+    phrase_column_name: str = "phrase",
+    phrases_translation_column_name: str = "phrases translation",
+) -> Dataset:
+    """
+    Combine original and extended paraphrase datasets into a unified format.
+
+    The original dataset is expected to have columns: "source", "target", 
+    "source_language", "target_language".
+
+    The extended dataset is expected to have columns: 
+    - "phrase" (will be renamed to "source")
+    - "phrases translation" (will be renamed to "target")
+    - "source_language" 
+    - "target_language"
+
+    Returns a concatenated dataset with standardized columns: 
+    "source", "target", "source_language", "target_language"
+    """
+    required_original_columns = {"source", "target", "source_language", "target_language"}
+    missing_original = [col for col in required_original_columns if col not in original_dataset.column_names]
+    if missing_original:
+        raise KeyError(
+            f"Missing required columns in original dataset: {missing_original}. "
+            f"Available columns: {original_dataset.column_names}"
+        )
+
+    required_extended_columns = {phrase_column_name, phrases_translation_column_name, "source_language", "target_language"}
+    missing_extended = [col for col in required_extended_columns if col not in extended_dataset.column_names]
+    if missing_extended:
+        raise KeyError(
+            f"Missing required columns in extended dataset: {missing_extended}. "
+            f"Available columns: {extended_dataset.column_names}"
+        )
+
+    # Select only the standard columns from the original dataset
+    original_standardized = original_dataset.select_columns(["source", "translation", "source_language", "target_language"])
+    original_standardized = original_standardized.rename_column('translation', phrases_translation_column_name)
+    original_standardized = original_standardized.rename_column('source', phrase_column_name)
+
+    # Rename columns in extended dataset to match standard format
+    extended_standardized = extended_dataset.select_columns([phrase_column_name, phrases_translation_column_name, "source_language", "target_language"])
+    #extended_standardized = extended_standardized.select_columns(["source", "target", "source_language", "target_language"])
+
+    # Concatenate both datasets
+    combined_dataset = concatenate_datasets([original_standardized, extended_standardized])
+
+    return combined_dataset
+
+
 def get_flores(
     src: str,
     languages: List[str],
