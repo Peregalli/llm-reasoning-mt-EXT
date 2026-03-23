@@ -684,11 +684,17 @@ def create_datasets(tokenizer, args):
             num_proc=args.num_workers if not args.streaming else None,
             streaming=args.streaming
             )
-            from train_datasets import get_extended_paraphrase
-            dataset = get_extended_paraphrase(
+            from train_datasets import get_extended_paraphrase, combine_original_and_extended_paraphrase
+            dataset_extended = get_extended_paraphrase(
                 dataset=dataset,
                 source_column_name=args.input_column_name,
                 target_column_name=args.output_column_name
+            )
+            dataset = combine_original_and_extended_paraphrase(
+                dataset,
+                dataset_extended,
+                args.input_column_name,
+                args.output_column_name,
             )
             try:
                 train_data = dataset["train"]
