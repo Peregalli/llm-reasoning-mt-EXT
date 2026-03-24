@@ -1,9 +1,140 @@
 import os
 import json
 import numpy as np
+import ast
 from typing import List, Union
 from datasets import Dataset, concatenate_datasets, load_dataset
 from comptra.languages import MAPPING_LANG_TO_KEY
+
+
+def get_extended_paraphrase(
+    dataset: Dataset,
+    source_column_name: str,
+    target_column_name: str,
+) -> Dataset:
+    """
+    Expand rows where source/target columns contain multiple sentences.
+
+    For each input row, this creates one output row per sentence pair found in
+    `source_column_name` and `target_column_name`, while copying all other column
+    values unchanged.
+    """
+
+    def _to_sentence_list(value):
+        if isinstance(value, list):
+            return [str(v).strip() for v in value if str(v).strip()]
+
+        if value is None:
+            return []
+
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return []
+
+            # Try JSON/list-literal parsing first for values like
+            # "[\"sent 1\", \"sent 2\"]".
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                try:
+                    parsed = ast.literal_eval(text)
+                except Exception:
+                    parsed = None
+
+            if isinstance(parsed, list):
+                return [str(v).strip() for v in parsed if str(v).strip()]
+
+            return [text]
+
+        return [str(value).strip()] if str(value).strip() else []
+
+    required_columns = {source_column_name, target_column_name}
+    missing_columns = [col for col in required_columns if col not in dataset.column_names]
+    if missing_columns:
+        raise KeyError(
+            f"Missing required columns in dataset: {missing_columns}. "
+            f"Available columns: {dataset.column_names}"
+        )
+
+    all_columns = dataset.column_names
+    expanded_rows = {column: [] for column in all_columns}
+
+    for row in dataset:
+        source_sentences = _to_sentence_list(row[source_column_name])
+        target_sentences = _to_sentence_list(row[target_column_name])
+
+        if len(source_sentences) == 0 or len(target_sentences) == 0:
+            continue
+
+        if len(source_sentences) != len(target_sentences):
+            raise ValueError(
+                "Source and target sentence lists must have same length per row. "
+                f"Found {len(source_sentences)} and {len(target_sentences)}."
+            )
+
+        for src_sentence, tgt_sentence in zip(source_sentences, target_sentences):
+            for column in all_columns:
+                if column == source_column_name:
+                    expanded_rows[column].append(src_sentence)
+                elif column == target_column_name:
+                    expanded_rows[column].append(tgt_sentence)
+                else:
+                    expanded_rows[column].append(row[column])
+
+    return Dataset.from_dict(expanded_rows)
+
+
+def combine_original_and_extended_paraphrase(
+    original_dataset: Dataset,
+    extended_dataset: Dataset,
+    phrase_column_name: str = "phrase",
+    phrases_translation_column_name: str = "phrases translation",
+) -> Dataset:
+    """
+    Combine original and extended paraphrase datasets into a unified format.
+
+    The original dataset is expected to have columns: "source", "target", 
+    "source_language", "target_language".
+
+    The extended dataset is expected to have columns: 
+    - "phrase" (will be renamed to "source")
+    - "phrases translation" (will be renamed to "target")
+    - "source_language" 
+    - "target_language"
+
+    Returns a concatenated dataset with standardized columns: 
+    "source", "target", "source_language", "target_language"
+    """
+    required_original_columns = {"source", "target", "source_language", "target_language"}
+    missing_original = [col for col in required_original_columns if col not in original_dataset.column_names]
+    if missing_original:
+        raise KeyError(
+            f"Missing required columns in original dataset: {missing_original}. "
+            f"Available columns: {original_dataset.column_names}"
+        )
+
+    required_extended_columns = {phrase_column_name, phrases_translation_column_name, "source_language", "target_language"}
+    missing_extended = [col for col in required_extended_columns if col not in extended_dataset.column_names]
+    if missing_extended:
+        raise KeyError(
+            f"Missing required columns in extended dataset: {missing_extended}. "
+            f"Available columns: {extended_dataset.column_names}"
+        )
+
+    # Select only the standard columns from the original dataset
+    original_standardized = original_dataset.select_columns(["source", "translation", "source_language", "target_language"])
+    original_standardized = original_standardized.rename_column('translation', phrases_translation_column_name)
+    original_standardized = original_standardized.rename_column('source', phrase_column_name)
+
+    # Rename columns in extended dataset to match standard format
+    extended_standardized = extended_dataset.select_columns([phrase_column_name, phrases_translation_column_name, "source_language", "target_language"])
+    #extended_standardized = extended_standardized.select_columns(["source", "target", "source_language", "target_language"])
+
+    # Concatenate both datasets
+    combined_dataset = concatenate_datasets([original_standardized, extended_standardized])
+
+    return combined_dataset
 
 
 def get_flores(
@@ -14,9 +145,9 @@ def get_flores(
     size: int = None,
 ):
     list_of_datasets = []
-    ds_src = load_dataset("facebook/flores", MAPPING_LANG_TO_KEY[src])
+    ds_src = load_dataset("facebook/flores", MAPPING_LANG_TO_KEY[src], trust_remote_code=True)
     for language in languages:
-        ds_tgt = load_dataset("facebook/flores", MAPPING_LANG_TO_KEY[language])
+        ds_tgt = load_dataset("facebook/flores", MAPPING_LANG_TO_KEY[language], trust_remote_code=True)
         dataset = Dataset.from_dict(
             {
                 "source": ds_src["dev"]["sentence"],
@@ -795,25 +926,23 @@ def get_cot(
 # """
 from comptra.utils import is_lang, quality_estimation
 from comptra.languages import MAPPING_LANG_TO_KEY
-from sonar.models.blaser.loader import load_blaser_model
-from sonar.inference_pipelines.text import TextToEmbeddingModelPipeline
 import torch
-
-device = "cuda" if torch.cuda.is_available() else "cpu"
-from fairseq2.typing import Device
-
-print(f"device: {device}")
-device = Device(device)
-blaser_qe = load_blaser_model("blaser_2_0_qe").eval()
-blaser_qe.to(device)
-text_embedder = TextToEmbeddingModelPipeline(
-    encoder="text_sonar_basic_encoder",
-    tokenizer="text_sonar_basic_encoder",
-    device=device,
-)
 
 
 def get_blaser_score(x, y, src, tgt):
+    from sonar.models.blaser.loader import load_blaser_model
+    from sonar.inference_pipelines.text import TextToEmbeddingModelPipeline
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    from fairseq2.typing import Device
+    print(f"device: {device}")
+    device = Device(device)
+    blaser_qe = load_blaser_model("blaser_2_0_qe").eval()
+    blaser_qe.to(device)
+    text_embedder = TextToEmbeddingModelPipeline(
+        encoder="text_sonar_basic_encoder",
+        tokenizer="text_sonar_basic_encoder",
+        device=device
+        )
     src_embs = text_embedder.predict([x], source_lang=MAPPING_LANG_TO_KEY[src])
     ref_embs = text_embedder.predict([y], source_lang=MAPPING_LANG_TO_KEY[tgt])
     blaser_score = blaser_qe(src=src_embs, mt=ref_embs).item()

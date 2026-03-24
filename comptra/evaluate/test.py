@@ -12,11 +12,8 @@ import transformers
 from datasets import Dataset
 import time
 
-try:
-    from comet import load_from_checkpoint, download_model
-except (ModuleNotFoundError, ImportError):
-    load_from_checkpoint = None
-    download_model = None
+load_from_checkpoint = None
+download_model = None
 from sacrebleu.metrics import BLEU, CHRF
 from scipy import stats
 import argparse
@@ -350,7 +347,7 @@ from comptra.languages import MAPPING_LANG_TO_KEY
 try:
     from sonar.models.blaser.loader import load_blaser_model
     from sonar.inference_pipelines.text import TextToEmbeddingModelPipeline
-except ModuleNotFoundError:
+except (ModuleNotFoundError, ImportError):
     load_blaser_model = None
     TextToEmbeddingModelPipeline = None
 
@@ -423,6 +420,13 @@ def main(args):
         per_device_batch_size = max(1, args.batch_size)
 
     if args.metric == "comet":
+        global load_from_checkpoint, download_model
+        if load_from_checkpoint is None or download_model is None:
+            try:
+                from comet import load_from_checkpoint, download_model
+            except (ModuleNotFoundError, ImportError):
+                load_from_checkpoint = None
+                download_model = None
         if load_from_checkpoint is None or download_model is None:
             raise ModuleNotFoundError(
                 "COMET is not installed. Install with `pip install unbabel-comet` "

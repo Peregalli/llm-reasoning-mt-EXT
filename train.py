@@ -676,6 +676,39 @@ def create_datasets(tokenizer, args):
         print(dataset["train"][0]["source"])
         print(dataset["train"][0]["target"] + "\n\n###\n")
         train_data, valid_data = dataset["train"], dataset["test"]
+    elif args.dataset_name_or_path == "paraphrase_decomp":
+        if args.split in ['Syntactic_Paraphrases_SP', 'Hard_Expressions_H', 'Paraphrases_P']:
+            dataset = load_dataset(args.data_dir,
+            data_dir=args.subset,
+            split=args.split,
+            num_proc=args.num_workers if not args.streaming else None,
+            streaming=args.streaming
+            )
+            from train_datasets import get_extended_paraphrase, combine_original_and_extended_paraphrase
+            dataset_extended = get_extended_paraphrase(
+                dataset=dataset,
+                source_column_name=args.input_column_name,
+                target_column_name=args.output_column_name
+            )
+            dataset = combine_original_and_extended_paraphrase(
+                dataset,
+                dataset_extended,
+                args.input_column_name,
+                args.output_column_name,
+            )
+            try:
+                train_data = dataset["train"]
+                valid_data = dataset["test"]
+            except:
+                dataset = dataset.train_test_split(
+                    test_size=args.size_valid_set, seed=args.seed
+                )
+                train_data = dataset["train"]
+                valid_data = dataset["test"]
+            print(train_data, valid_data)
+            print(f"train_data[0]: {train_data[0]}")
+        else:
+            print('Select Decomposition paraphrase strategy for the extended dataset')
     else:
         dataset = load_dataset(
             args.dataset_name_or_path,
