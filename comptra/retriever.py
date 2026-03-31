@@ -1,4 +1,3 @@
-from sonar.inference_pipelines.text import TextToEmbeddingModelPipeline
 from sklearn.metrics import pairwise_distances
 from rank_bm25 import BM25Okapi
 import numpy as np
@@ -114,6 +113,7 @@ class Retriever:
         
         if retriever_type == "SONAR":
             try:
+                from sonar.inference_pipelines.text import TextToEmbeddingModelPipeline
                 self.embedder = TextToEmbeddingModelPipeline(
                     encoder="text_sonar_basic_encoder", tokenizer="text_sonar_basic_encoder"
                 )
